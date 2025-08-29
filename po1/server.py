@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import requests
 import os
 
-app = Flask(__name__)
+# Tell Flask where static frontend files live
+app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app)
 
 # Optional config via environment variables
@@ -12,6 +13,11 @@ USDA_API_KEY = os.getenv('USDA_API_KEY')
 
 # If API keys are not provided, the server will return demo values.
 HF_MODEL = "nateraw/food"  # default model name on Hugging Face
+
+# Serve index.html at root URL
+@app.route("/")
+def home():
+    return send_from_directory(app.static_folder, "index.html")
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -26,7 +32,6 @@ def analyze():
         if HF_API_KEY:
             try:
                 headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-                # send raw image bytes
                 resp = requests.post(
                     f"https://api-inference.huggingface.co/models/{HF_MODEL}", 
                     headers=headers, 
@@ -37,7 +42,7 @@ def analyze():
                 preds = resp.json()
                 if isinstance(preds, list) and len(preds) > 0 and isinstance(preds[0], dict):
                     label = preds[0].get('label')
-                image_file.seek(0)  # Reset file pointer for potential reuse
+                image_file.seek(0)  # Reset file pointer
             except Exception as e:
                 print('HF error', e)
                 label = None
@@ -57,13 +62,12 @@ def analyze():
     
     if USDA_API_KEY:
         try:
-            # First search for the food
             search_response = requests.get(
                 "https://api.nal.usda.gov/fdc/v1/foods/search",
                 params={
                     "api_key": USDA_API_KEY, 
                     "query": label, 
-                    "pageSize": 5,  # Get more results to find the best match
+                    "pageSize": 5,
                     "dataType": "Survey (FNDDS),SR Legacy,Foundation"
                 },
                 timeout=30
@@ -73,29 +77,21 @@ def analyze():
             foods = data.get('foods') or []
             
             if foods:
-                # Try to find the best match
                 best_match = None
                 for food in foods:
                     if label.lower() in food.get('description', '').lower():
                         best_match = food
                         break
-                
-                # If no exact match, use the first result
                 if not best_match and foods:
                     best_match = foods[0]
                 
                 if best_match:
-                    # Get additional info
                     additional_info = best_match.get('description', '')
-                    
-                    # Get nutrients and scale by quantity
                     nutrients = best_match.get('foodNutrients', [])
                     for n in nutrients:
                         name = (n.get('nutrientName') or '').lower()
                         val = n.get('value', 0)
                         unit = n.get('unitName') or ''
-                        
-                        # Scale the value based on quantity (assuming original is for 100g)
                         scaled_val = val * (quantity / 100)
                         
                         if 'energy' in name or 'calories' in name:
@@ -110,9 +106,8 @@ def analyze():
             print('USDA error', e)
             nutrition = {}
     
-    # If no nutrition data found, use generic values based on food type
+    # If no nutrition data found, use generic values
     if not nutrition:
-        # These are example values per 100g - will be scaled by quantity
         generic_nutrition = {
             "apple": {"calories": 52, "protein": 0.3, "carbs": 14, "fat": 0.2},
             "banana": {"calories": 89, "protein": 1.1, "carbs": 23, "fat": 0.3},
@@ -121,8 +116,6 @@ def analyze():
             "rice": {"calories": 130, "protein": 2.7, "carbs": 28, "fat": 0.3},
             "bread": {"calories": 265, "protein": 9, "carbs": 49, "fat": 3.2},
         }
-        
-        # Find the closest match
         matched_food = None
         for food_key in generic_nutrition:
             if food_key in label.lower():
@@ -131,7 +124,6 @@ def analyze():
         
         if matched_food:
             nut = generic_nutrition[matched_food]
-            # Scale values based on quantity
             scale = quantity / 100
             nutrition = {
                 "calories": f"{nut['calories'] * scale:.1f} kcal",
@@ -139,9 +131,8 @@ def analyze():
                 "carbs": f"{nut['carbs'] * scale:.1f} g",
                 "fat": f"{nut['fat'] * scale:.1f} g"
             }
-            additional_info = "Note: These are generic values for this food type. For accurate results, provide USDA API key."
+            additional_info = "Note: These are generic values. For accurate results, provide USDA API key."
         else:
-            # Fallback to pizza nutrition
             scale = quantity / 100
             nutrition = {
                 "calories": f"{266 * scale:.1f} kcal",
@@ -149,8 +140,8 @@ def analyze():
                 "carbs": f"{33 * scale:.1f} g",
                 "fat": f"{10 * scale:.1f} g"
             }
-            additional_info = "Note: Using generic nutrition values. For accurate results, provide USDA API key."
-
+            additional_info = "Note: Using generic fallback values."
+    
     return jsonify({
         "food": label,
         "quantity": quantity,
